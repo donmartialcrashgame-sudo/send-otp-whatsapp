@@ -12,6 +12,7 @@ const PORT = process.env.PORT || 10000;
 const API_VERSION = process.env.WHATSAPP_API_VERSION || 'v25.0';
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
+const WEBHOOK_VERIFY_TOKEN = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
 const DEFAULT_TEMPLATE = process.env.WHATSAPP_TEMPLATE_NAME || 'jaspers_market_plain_text_v1';
 const DEFAULT_LANGUAGE = process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US';
 
@@ -59,8 +60,11 @@ app.get('/', (req, res) => {
     apiVersion: API_VERSION,
     endpoints: {
       health: 'GET /health',
+      webhook: 'GET/POST /api/whatsapp/webhook',
       sendTemplate: 'POST /api/whatsapp/send-template',
-      sendText: 'POST /api/whatsapp/send-text'
+      sendText: 'POST /api/whatsapp/send-text',
+      sendOtp: 'POST /api/auth/send-whatsapp-otp',
+      verifyOtp: 'POST /api/auth/verify-whatsapp-otp'
     }
   });
 });
@@ -69,8 +73,53 @@ app.get('/health', (req, res) => {
   res.json({
     ok: true,
     whatsappConfigured: Boolean(ACCESS_TOKEN && PHONE_NUMBER_ID),
+    webhookConfigured: Boolean(WEBHOOK_VERIFY_TOKEN),
     apiVersion: API_VERSION
   });
+});
+
+// Meta webhook verification endpoint.
+// In Meta, use this URL as the Callback URL and use the exact same
+// WHATSAPP_WEBHOOK_VERIFY_TOKEN value as the Verify Token.
+app.get('/api/whatsapp/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && WEBHOOK_VERIFY_TOKEN && token === WEBHOOK_VERIFY_TOKEN) {
+    return res.status(200).send(String(challenge || ''));
+  }
+
+  return res.sendStatus(403);
+});
+
+// Meta sends incoming messages and delivery/status events here.
+app.post('/api/whatsapp/webhook', (req, res) => {
+  try {
+    const body = req.body || {};
+
+    if (body.object !== 'whatsapp_business_account') {
+      return res.sendStatus(404);
+    }
+
+    // Acknowledge immediately so Meta does not retry while we process the event.
+    res.sendStatus(200);
+
+    // Log only non-secret event metadata. Do not log access tokens or OTP values.
+    for (const entry of body.entry || []) {
+      for (const change of entry.changes || []) {
+        const value = change.value || {};
+        console.log('WhatsApp webhook event:', {
+          field: change.field || null,
+          phoneNumberId: value.metadata?.phone_number_id || null,
+          messageCount: Array.isArray(value.messages) ? value.messages.length : 0,
+          statusCount: Array.isArray(value.statuses) ? value.statuses.length : 0
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Webhook processing error:', error.message);
+  }
 });
 
 app.post('/api/whatsapp/send-template', async (req, res) => {
@@ -153,7 +202,6 @@ app.post('/api/auth/send-whatsapp-otp', async (req, res) => {
     const otp = crypto.randomInt(100000, 1000000).toString();
     const otpHash = crypto.createHash('sha256').update(otp).digest('hex');
 
-    // Authentication templates normally require a template configured in WhatsApp Manager.
     const templateName = String(req.body.template || process.env.WHATSAPP_OTP_TEMPLATE_NAME || 'game_api_otp').trim();
     const languageCode = String(req.body.language || process.env.WHATSAPP_OTP_TEMPLATE_LANGUAGE || 'en_US').trim();
 
